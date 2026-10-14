@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#07040d">
+<title>Hasmukh Karkhana — Treasure Hunt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bangers&family=Comic+Neue:wght@700&family=Inter:wght@400;600;700&family=Noto+Serif+JP:wght@900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js" defer></script>
+</head>
+<body>
+<canvas id="fx"></canvas><div id="slash"></div>
+<div class="wrap" id="app"></div>
+<div id="snd" title="Sound on/off">🔊</div>
+<script>
+const $app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let me = null, poll = null, tick = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { method: opts.method || 'GET', headers: { 'Content-Type': 'application/json' },
+    body: opts.body ? JSON.stringify(opts.body) : undefined, credentials: 'same-origin' });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && j.error === 'login') { me = null; throw Object.assign(new Error('login'), { login: true }); }
+  if (!r.ok) throw Object.assign(new Error(j.error || 'Something went wrong'), { data: j });
+  return j;
+}
+function toast(msg) {
+  const t = document.createElement('div'); t.className = 'toast rise'; t.textContent = msg;
+  document.body.appendChild(t); setTimeout(() => t.remove(), 3400);
+}
+/* ink-rain "confetti" */
+function confetti() {
+  const c = document.createElement('div'); c.className = 'confetti';
+  for (let i = 0; i < 60; i++) {
+    const p = document.createElement('i');
+    p.style.cssText = `left:${Math.random() * 100}%;height:${14 + Math.random() * 40}px;opacity:${.4 + Math.random() * .6};animation-duration:${.9 + Math.random() * 1.4}s;animation-delay:${Math.random() * .7}s`;
+    c.appendChild(p);
+  }
+  document.body.appendChild(c); setTimeout(() => c.remove(), 3600);
+}
+function flash() { const f = document.createElement('div'); f.className = 'flash'; document.body.appendChild(f); setTimeout(() => f.remove(), 700); }
+const buzz = p => { try { navigator.vibrate?.(p); } catch {} };
+function burstClip(n = 20, inner = .64) {
+  const pts = [];
+  for (let i = 0; i < n * 2; i++) {
+    const a = i * Math.PI / n, r = i % 2 ? inner * 50 + Math.random() * 5 : 50 - Math.random() * 5;
+    pts.push(`${(50 + r * Math.cos(a)).toFixed(1)}% ${(50 + r * Math.sin(a)).toFixed(1)}%`);
+  }
+  return `polygon(${pts.join(',')})`;
+}
+const evText = e => (e.type === 'assist' ? '✚ ' : e.type === 'sabotage' ? '✕ ' : '') + String(e.message).replace(/^[\p{Extended_Pictographic}\uFE0F\s]+/u, '');
+const fmt = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const clear = () => { clearInterval(poll); clearInterval(tick); };
+
+const TICK = 'HASMUKH KARKHANA ✦ TREASURE HUNT ✦ 宝探し ✦ FIND THE QR ✦ TRUST NO ONE ✦ ';
+const ticker = () => `<div class="ticker"><div>${TICK.repeat(6)}</div></div>`;
+const topbar = (right = '') => `${ticker()}<div class="top"><div class="brand"><div class="logo">HK</div><div>HASMUKH KARKHANA<small>TREASURE HUNT</small></div></div>${right}</div>`;
+const ONO = { good: ['ZOOM!', 'DON!', 'KIRA✦', 'BAAM!'], bad: ['GOGOGO', 'ZAP!', 'KRAK!', 'DOOM'] };
+const onos = tone => tone ? [0, 1, 2].map(i => `<span class="onomato" style="left:${[6, 70, 38][i]}%;top:${[14, 22, 82][i]}%;--r:${[-12, 10, -5][i]}deg;animation-delay:${i * .4}s">${pickOne(ONO[tone])}</span>`).join('') : '';
+const stage = (sfx, opts = {}) => `<div class="stage ${opts.tone || ''} ${opts.shake ? 'shake' : ''}"><div class="speed"></div>${onos(opts.tone)}
+  <div class="burst" style="clip-path:${burstClip()}"></div><div class="burst in" style="clip-path:${burstClip(16, .7)}"></div>
+  <div class="sfx glitch ${opts.sm ? 'sm' : ''}">${sfx}</div>${opts.kicker ? `<div class="kicker">${opts.kicker}</div>` : ''}</div>`;
+
+/* ---------- FX: embers + sakura canvas ---------- */
+(function fx() {
+  const c = document.getElementById('fx'), x = c.getContext('2d'); let W, H, P = [];
+  const rs = () => { W = c.width = innerWidth; H = c.height = innerHeight; }; rs(); addEventListener('resize', rs);
+  const cols = ['255,46,136', '34,228,255', '255,197,51', '189,167,240'];
+  const mk = (init) => ({ x: Math.random() * W, y: init ? Math.random() * H : H + 10, r: 1 + Math.random() * 3, vy: .25 + Math.random() * .9, vx: (Math.random() - .5) * .5,
+    c: cols[Math.random() * 4 | 0], a: .25 + Math.random() * .6, w: Math.random() * 6, petal: Math.random() < .3 });
+  for (let i = 0; i < (innerWidth < 600 ? 32 : 60); i++) P.push(mk(true));
+  (function f() {
+    x.clearRect(0, 0, W, H);
+    for (const p of P) {
+      p.y -= p.vy; p.w += .03; p.x += p.vx + Math.sin(p.w) * .4;
+      if (p.y < -10) Object.assign(p, mk(false));
+      x.fillStyle = `rgba(${p.c},${p.a})`; x.shadowColor = `rgba(${p.c},.9)`; x.shadowBlur = 10;
+      x.beginPath();
+      if (p.petal) x.ellipse(p.x, p.y, p.r * 2, p.r, p.w, 0, 7); else x.arc(p.x, p.y, p.r, 0, 7);
+      x.fill();
+    }
+    requestAnimationFrame(f);
+  })();
+})();
+
+/* ---------- SFX: tiny WebAudio synth (no files needed) ---------- */
+const SND = (() => {
+  let ctx = null, on = (() => { try { return localStorage.getItem('hkSnd') !== '0'; } catch { return true; } })();
+  const btn = document.getElementById('snd'); const paint = () => { btn.textContent = on ? '🔊' : '🔇'; btn.classList.toggle('off', !on); }; paint();
+  const tone = (f, t0, d, type = 'square', v = .06, f2) => {
+    if (!on) return; try { ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume();
+      const o = ctx.createOscillator(), g = ctx.createGain(); o.type = type; o.frequency.setValueAtTime(f, ctx.currentTime + t0);
+      if (f2) o.frequency.exponentialRampToValueAtTime(f2, ctx.currentTime + t0 + d);
+      g.gain.setValueAtTime(v, ctx.currentTime + t0); g.gain.exponentialRampToValueAtTime(.0001, ctx.currentTime + t0 + d);
+      o.connect(g).connect(ctx.destination); o.start(ctx.currentTime + t0); o.stop(ctx.currentTime + t0 + d + .02); } catch {}
+  };
+  btn.onclick = () => { on = !on; try { localStorage.setItem('hkSnd', on ? '1' : '0'); } catch {} paint(); if (on) tone(660, 0, .1); };
+  return {
+    tap: () => tone(520, 0, .06, 'square', .04),
+    win: () => { [523, 659, 784].forEach((f, i) => tone(f, i * .09, .16, 'square', .06)); },
+    big: () => { [523, 659, 784, 1046, 1318].forEach((f, i) => tone(f, i * .1, .22, 'triangle', .08)); tone(130, 0, .6, 'sawtooth', .05, 40); },
+    bad: () => { tone(220, 0, .25, 'sawtooth', .06, 70); tone(110, .05, .35, 'square', .05, 50); },
+    zap: () => { tone(1200, 0, .18, 'sawtooth', .05, 200); },
+    ok: () => { tone(880, 0, .08, 'square', .05); tone(1320, .08, .12, 'square', .05); },
+  };
+})();
+
+/* ---------- RANKS + SENSEI ---------- */
+const RANKS = [['E', 'ROOKIE'], ['D', 'SCOUT'], ['C', 'HUNTER'], ['B', 'ELITE'], ['A', 'LEGEND'], ['S', 'MYTHIC']];
+function rankOf(done, total, fin) {
+  if (fin) return { r: 'S', n: RANKS[5][1], pct: 100 };
+  const pct = total ? done / total : 0, i = Math.min(4, Math.floor(pct * 5));
+  return { r: RANKS[i][0], n: RANKS[i][1], pct: Math.round(pct * 100) };
+}
+const SENSEI = {
+  start: ['Every legend starts with ONE scan. Read the clue. Move.', 'No map. No mercy. Only clues. Go go go!'],
+  mid: ['Slow and steady? No. FAST and SMART.', 'Other squads are closing in. Do not blink.', 'The next QR is closer than you think.', 'Think like the clue-maker. What would THEY hide?'],
+  hot: ['One more panel and the chapter ends!', 'You can smell the treasure. Do not choke now!'],
+  done: ['The legend is complete. Go claim your prize!'],
+  paused: ['The arena is frozen. Stretch. Hydrate. Plot.'],
+};
+const pickOne = a => a[Math.random() * a.length | 0];
+function senseiLine(d) {
+  if (d.finished) return pickOne(SENSEI.done); if (!d.active) return pickOne(SENSEI.paused);
+  if (d.progress === 0) return pickOne(SENSEI.start); if (d.total - d.progress <= 1) return pickOne(SENSEI.hot); return pickOne(SENSEI.mid);
+}
+const sensei = line => `<div class="sensei rise"><div class="face">🦊</div><div class="say"><small>SENSEI SAYS</small>${esc(line)}</div></div>`;
+function typewrite(el, text, speed = 22) {
+  el.textContent = ''; let i = 0; const parent = el.closest('.parch'); parent?.classList.add('typing');
+  const t = setInterval(() => { el.textContent = text.slice(0, ++i); if (i >= text.length) { clearInterval(t); parent?.classList.remove('typing'); } }, speed);
+}
+
+/* ---------- intro ---------- */
+function intro(done) {
+  const seen = (() => { try { return sessionStorage.getItem('hkIntro'); } catch { return 1; } })();
+  if (seen) return done();
+  const el = document.createElement('div'); el.id = 'intro';
+  el.innerHTML = `<div class="speed"></div><div class="dots"></div><div class="kanji">宝探し</div>
+    <div class="bar t"></div><div class="bar b"></div>
+    <div class="core"><div class="pre">— PRESENTING —</div>
+      <h1 class="l">HASMUKH</h1><h1 class="r"><span>KARKHANA</span></h1>
+      <div class="sub">THE GREAT TREASURE HUNT</div><div class="tap">▶ TAP TO ENTER ◀</div></div>
+    <div class="skip">TAP ANYWHERE</div><div class="slash"></div>`;
+  document.body.appendChild(el);
+  let gone = false;
+  const enter = () => {
+    if (gone) return; gone = true;
+    try { sessionStorage.setItem('hkIntro', '1'); } catch {}
+    buzz([40, 30, 90]); el.classList.add('out'); setTimeout(done, 280); setTimeout(() => el.remove(), 900);
+  };
+  el.addEventListener('click', enter); window.addEventListener('keydown', enter, { once: true });
+}
+
+/* ---------- in-app QR scanner ---------- */
+const parseCode = t => { t = String(t || '').trim(); const m = t.match(/\/q\/([a-z0-9]+)/i); const c = (m ? m[1] : t).toLowerCase(); return /^[a-z0-9]{4,24}$/.test(c) ? c : null; };
+function openScanner() {
+  const o = document.createElement('div'); o.id = 'scanner';
+  o.innerHTML = `<video playsinline muted autoplay></video><canvas hidden></canvas>
+    <div class="vf"><i></i><i></i><i></i><i></i><b></b></div>
+    <div class="st"><h2>SCAN QR</h2><span class="chip" id="sx">✕ Close</span></div>
+    <div class="smsg" id="smsg">Aim at the QR code</div>
+    <div class="up"><label class="btn ghost sm">Use a photo instead<input type="file" accept="image/*" id="sfile" hidden></label></div>`;
+  document.body.appendChild(o);
+  const v = o.querySelector('video'), cv = o.querySelector('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true }), msg = o.querySelector('#smsg');
+  let stream = null, raf = 0, stopped = false, n = 0;
+  const say = (t, bad) => { msg.textContent = t; msg.classList.toggle('bad', !!bad); };
+  const close = () => { stopped = true; cancelAnimationFrame(raf); stream?.getTracks().forEach(t => t.stop()); window.removeEventListener('keydown', esc_); o.remove(); };
+  const esc_ = e => { if (e.key === 'Escape') close(); };
+  window.addEventListener('keydown', esc_);
+  const hit = txt => { const c = parseCode(txt); if (!c) { say('That QR isn’t from this hunt', true); SND.bad(); return false; } buzz(60); SND.zap(); o.classList.add('ok'); close(); go('/q/' + c); return true; };
+  const det = ('BarcodeDetector' in window) ? (() => { try { return new BarcodeDetector({ formats: ['qr_code'] }); } catch { return null; } })() : null;
+  const decode = async src => {
+    if (det) { try { const r = await det.detect(src); if (r[0]?.rawValue) return r[0].rawValue; } catch {} }
+    if (window.jsQR) {
+      const w = src.videoWidth || src.width, h = src.videoHeight || src.height; if (!w) return null;
+      cv.width = w; cv.height = h; ctx.drawImage(src, 0, 0, w, h);
+      const d = ctx.getImageData(0, 0, w, h); return jsQR(d.data, w, h, { inversionAttempts: 'attemptBoth' })?.data || null;
+    }
+    return null;
+  };
+  const loop = async () => {
+    if (stopped) return;
+    if (v.readyState >= 2 && ++n % 4 === 0) { const t = await decode(v); if (t && hit(t)) return; }
+    raf = requestAnimationFrame(loop);
+  };
+  o.querySelector('#sx').onclick = close;
+  o.querySelector('#sfile').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try { const bmp = await createImageBitmap(f); const t = await decode(bmp); if (!t || !hit(t)) say(t ? 'That QR isn’t from this hunt' : 'No QR found in that photo', true); } catch { say('Couldn’t read that photo', true); }
+  };
+  if (!navigator.mediaDevices?.getUserMedia) return say('Camera not available here. Use a photo instead.', true);
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+    .then(s => { if (stopped) return s.getTracks().forEach(t => t.stop()); stream = s; v.srcObject = s; v.play().catch(() => {}); loop(); })
+    .catch(() => say('Camera blocked. Allow camera access, or use a photo.', true));
+}
+
+/* ---------- routing ---------- */
+async function route() {
+  clear();
+  try { await api('/api/me').then(d => me = d); } catch (e) { if (!e.login) return fail(e); }
+  if (!me) { loginView(); return intro(() => {}); }
+  const m = location.pathname.match(/^\/q\/([a-z0-9]+)/);
+  if (m) return scanView(m[1]);
+  homeView();
+}
+function fail(e) { $app.innerHTML = topbar() + `<div class="card hot center">${stage('OFFLINE!', { sm: 1 })}<p class="muted">${esc(e.message)}</p><button class="btn" onclick="route()">Try again</button></div>`; }
+function go(path) {
+  const s = document.getElementById('slash'); s.classList.remove('go'); void s.offsetWidth; s.classList.add('go'); SND.tap();
+  setTimeout(() => { history.pushState({}, '', path); route(); window.scrollTo(0, 0); }, 230);
+}
+window.addEventListener('popstate', route);
+
+/* ---------- login ---------- */
+function loginView() {
+  $app.innerHTML = `${ticker()}<div class="rise" style="padding-top:22px">
+    <div class="login-title"><div class="jp">宝 探 し</div><h1>HASMUKH<br><span>KARKHANA</span></h1><p>TREASURE HUNT</p></div>
+    <form class="card hot" id="f"><h3>Team login</h3>
+      <label style="margin-top:0">Team name</label><input name="team" autocomplete="username" autocapitalize="off" required>
+      <label>Password</label><input name="password" type="password" autocomplete="current-password" required>
+      <div class="err" id="err"></div>
+      <button class="btn" style="margin-top:6px">Enter the hunt ▶</button>
+    </form>
+    <p class="center muted small" style="font-family:var(--head);letter-spacing:.2em">YOUR ORGANISER GAVE YOU A TEAM NAME + PASSWORD</p></div>`;
+  document.getElementById('f').onsubmit = async e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    try { await api('/api/login', { method: 'POST', body: { team: f.get('team'), password: f.get('password') } }); flash(); SND.win(); route(); }
+    catch (er) { document.getElementById('err').textContent = '✕ ' + er.message; buzz(200); }
+  };
+}
+async function logout() { await api('/api/logout', { method: 'POST' }).catch(() => {}); me = null; history.replaceState({}, '', '/'); route(); }
+
+/* ---------- home ---------- */
+function gauge(done, total, finished) {
+  const dense = total > 24;
+  return `<div class="gauge ${dense ? 'dense' : ''}">${Array.from({ length: total }, (_, i) => `<i class="${i < done ? 'on' : (!finished && i === done ? 'now' : '')}"></i>`).join('')}</div>`;
+}
+function homeView() {
+  const d = me;
+  const last = d.revealed[d.revealed.length - 1];
+  const clueText = d.finished ? null : (last ? last.clue : d.startClue);
+  const unseen = d.events.filter(e => !e.seen);
+  const rk = rankOf(d.progress, d.total, d.finished);
+  const head = d.finished ? 'MISSION COMPLETE!' : d.progress === 0 ? 'THE HUNT BEGINS' : 'KEEP HUNTING';
+  $app.innerHTML = `
+  ${topbar(`<span class="chip" onclick="logout()"><i class="dot"></i>${esc(d.team.name)} ✕</span>`)}
+  ${!d.active ? `<div class="notice">⏸ THE HUNT IS PAUSED BY THE ORGANISERS. HANG TIGHT.</div>` : ''}
+  <div class="card hot hero rise"><div class="eyebrow">Hunter ID</div>
+    <div class="hid"><div class="rank r-${rk.r}"><b>${rk.r}</b></div>
+      <div style="flex:1;min-width:0"><div class="rank-name">${rk.n} RANK</div><h2>${esc(d.team.name)}</h2></div>
+      <div class="big-n" style="float:none;margin:0">${d.progress}<span>/${d.total}</span></div></div>
+    <div class="xp"><i style="width:${rk.pct}%"></i></div>
+    ${gauge(d.progress, d.total, d.finished)}
+    <div class="eyebrow" style="margin:6px 0 0">${head} — ${d.finished ? 'ALL QRs FOUND' : `${d.total - d.progress} QR${d.total - d.progress === 1 ? '' : 'S'} LEFT`}</div>
+  </div>
+
+  ${sensei(senseiLine(d))}
+
+  ${unseen.map(e => `<div class="notice ${e.type} rise">${esc(evText(e))}<small>${new Date(e.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></div>`).join('')}
+
+  ${d.finished ? `<div class="parch rise"><div class="eyebrow">Final panel</div>You cracked the last clue. Run to the organisers and claim your treasure!</div>` :
+  clueText ? `<div class="parch rise"><div class="eyebrow">${last ? `Clue ${last.idx + 1} — next target` : 'Opening clue'}</div><span class="tw">${esc(clueText)}</span></div>` : `<div class="card"><p class="muted">No starting clue yet. Ask the organisers.</p></div>`}
+
+  <div class="card hot"><h3>Found a QR?</h3>
+    <button class="btn scan" id="scanbtn" ${d.active ? '' : 'disabled'}>◉ Scan QR code</button>
+    <div class="or">OR TYPE THE CODE</div>
+    <form class="row" id="codef"><input name="c" placeholder="CODE UNDER THE QR" autocapitalize="off" style="flex:2"><button class="btn" style="flex:1">Open</button></form>
+  </div>
+
+  ${d.revealed.length ? `<div class="card"><details><summary>Clues collected (${d.revealed.length})</summary><div style="margin-top:10px">
+    ${d.revealed.map(r => `<div class="item"><div class="num">${r.idx + 1}</div><div style="font-family:var(--hand);font-weight:700;font-size:17px">${esc(r.clue)}</div></div>`).join('')}</div></details></div>` : ''}
+
+  <div class="card"><h3>Rankings</h3>
+    ${d.leaderboard.map((t, i) => `<div class="lb ${t.id === d.team.id ? 'me' : ''}"><div class="pos">${i + 1}</div><div class="nm">${i === 0 && t.progress > 0 ? '<span class="crown">👑</span>' : ''}${esc(t.name)}${t.finishedAt ? ' <span class="fin">★</span>' : ''}</div><div class="bar"><i style="width:${t.total ? t.progress / t.total * 100 : 0}%"></i></div><div class="small muted">${t.progress}/${t.total}</div></div>`).join('') || '<p class="muted">No teams yet.</p>'}
+  </div>
+
+  ${d.events.length > unseen.length ? `<div class="card"><details><summary>Earlier messages</summary><div style="margin-top:12px">${d.events.filter(e => e.seen).map(e => `<div class="notice ${e.type}">${esc(evText(e))}</div>`).join('')}</div></details></div>` : ''}`;
+
+  document.getElementById('scanbtn').onclick = openScanner;
+  document.getElementById('codef').onsubmit = e => {
+    e.preventDefault(); let c = new FormData(e.target).get('c').trim().toLowerCase();
+    c = c.split('/q/').pop(); if (c) go('/q/' + c);
+  };
+  if (unseen.length) api('/api/events/seen', { method: 'POST' }).catch(() => {});
+  poll = setInterval(async () => {
+    try { const prev = me.events.length + '|' + me.progress + '|' + me.leaderboard.map(t => t.progress).join();
+      me = await api('/api/me');
+      const cur = me.events.length + '|' + me.progress + '|' + me.leaderboard.map(t => t.progress).join();
+      if (prev !== cur && !document.activeElement?.matches('input')) { if (me.events.length > prev.split('|')[0]) buzz([80, 40, 80]); homeView(); } } catch {}
+  }, 6000);
+}
+
+/* ---------- scan ---------- */
+async function scanView(code) {
+  $app.innerHTML = topbar() + `<div class="card center"><div class="stage"><div class="speed"></div><div class="sfx sm">SCANNING…</div></div></div>`;
+  let r;
+  try { r = await api('/api/scan/' + code); } catch (e) { return e.login ? route() : fail(e); }
+  const back = `<button class="btn ghost" style="margin-top:6px" onclick="go('/')">◀ Back to my quest</button>`;
+  const head = topbar(`<span class="chip" onclick="go('/')">Home</span>`);
+
+  if (r.status === 'unknown') { $app.innerHTML = head + `<div class="card hot center">${stage('WHO?!', { tone: 'bad', shake: 1, kicker: 'THAT QR ISN’T PART OF THE HUNT' })}</div>` + back; return; }
+  if (r.status === 'inactive') { $app.innerHTML = head + `<div class="card hot center">${stage('PAUSED', { tone: 'bad', kicker: 'COME BACK WHEN THE ORGANISERS RESTART IT' })}</div>` + back; return; }
+
+  if (r.status === 'advance' || r.status === 'finished' || r.status === 'replay') {
+    const fin = r.status === 'finished', rep = r.status === 'replay';
+    $app.innerHTML = head + `${stage(fin ? 'VICTORY!' : rep ? 'REVISITED' : 'FOUND IT!', { tone: rep ? '' : 'good', shake: !rep, sm: rep, kicker: `<b class="${fin ? 'ok' : ''}">${rep ? 'CLUE' : 'STEP'} ${r.step}/${r.total}</b> &nbsp;${esc(r.station)}` })}
+      <div class="parch rise" style="animation-delay:.6s"><div class="eyebrow">${fin ? 'Final message' : 'Your next clue'}</div><span class="tw" id="cluetw"></span></div>${back}`;
+    setTimeout(() => typewrite(document.getElementById('cluetw'), r.clue, fin ? 30 : 20), 700);
+    if (!rep) { flash(); confetti(); buzz(fin ? [100, 50, 100, 50, 300] : [60, 40, 140]); fin ? SND.big() : SND.win(); }
+    return;
+  }
+
+  if (r.status === 'locked') {
+    const end = Date.now() + (r.until - r.now);
+    $app.innerHTML = head + `<div class="card hot center">${stage('JAMMED!', { tone: 'bad', shake: 1, kicker: 'ANOTHER TEAM SABOTAGED THIS CLUE' })}
+      <div class="hazard"></div><div class="eyebrow">Unlocks in</div><div class="timer" id="cd">${fmt(end - Date.now())}</div><div class="hazard"></div>
+      <p class="muted small">Hunt other QRs meanwhile — or find a way to help someone else.</p></div>${back}`;
+    buzz([200, 60, 200]); SND.bad();
+    tick = setInterval(() => { const left = end - Date.now(); const el = document.getElementById('cd');
+      if (left <= 0) { clear(); scanView(code); } else if (el) el.textContent = fmt(left); }, 500);
+    return;
+  }
+
+  // foreign / notyet
+  const t = r.targets || [];
+  const early = r.status === 'notyet';
+  let sel = t.length === 1 ? t[0].id : null;
+  let cdEnd = Date.now() + (r.cooldownLeft || 0);
+  $app.innerHTML = head + `<div class="card hot center">${stage(early ? 'TOO EARLY!' : 'INTRUDER!', { tone: 'bad', shake: 1, kicker: early ? 'FOLLOW YOUR CLUES IN ORDER' : 'THIS QR BELONGS TO ANOTHER TEAM' })}</div>
+    ${t.length ? `<div class="card rise"><h3>Choose your move</h3>
+      ${t.length > 1 ? `<label style="margin-top:0">Whose QR is this?</label><div class="chips" id="chips">${t.map(x => `<span class="pick" data-id="${x.id}">${esc(x.name)}</span>`).join('')}</div>` : `<p style="margin:0">This QR is on <b>${esc(t[0].name)}</b>’s route.</p>`}
+      <div class="choice">
+        <button class="btn green" id="assist"><span>✚ Assist</span><small>Send them this QR’s location</small></button>
+        <button class="btn red" id="sab"><span>✕ Sabotage</span><small id="sabsub">Lock their clue here for ${r.sabotageMinutes} min</small></button>
+      </div><div class="err" id="err"></div></div>` : `<div class="card center"><p class="muted">No other team needs this QR right now.</p></div>`}${back}`;
+
+  if (!t.length) return;
+  const chips = document.getElementById('chips');
+  const refresh = () => {
+    chips?.querySelectorAll('.pick').forEach(c => c.classList.toggle('on', +c.dataset.id === sel));
+    const tg = t.find(x => x.id === sel), left = cdEnd - Date.now();
+    document.getElementById('assist').disabled = !tg || tg.assisted;
+    document.getElementById('sab').disabled = !tg || tg.locked || left > 0;
+    document.getElementById('sabsub').textContent = tg?.locked ? 'Already jammed' : left > 0 ? `Recharging… ${fmt(left)}` : `Lock their clue here for ${r.sabotageMinutes} min`;
+    if (tg?.assisted) document.querySelector('#assist small').textContent = 'You already helped them here';
+  };
+  chips?.addEventListener('click', e => { const c = e.target.closest('.pick'); if (c) { sel = +c.dataset.id; refresh(); } });
+  const act = async kind => {
+    try { const j = await api(`/api/scan/${code}/${kind}`, { method: 'POST', body: { teamId: sel } });
+      toast(j.message); flash(); buzz(kind === 'assist' ? [60, 40, 60] : [150, 50, 250]); kind === 'assist' ? SND.ok() : SND.zap();
+      const tg = t.find(x => x.id === sel);
+      if (kind === 'assist') tg.assisted = true; else { tg.locked = true; cdEnd = Date.now() + (j.cooldownLeft || 0); } refresh();
+    } catch (e) { document.getElementById('err').textContent = '✕ ' + e.message; }
+  };
+  document.getElementById('assist').onclick = () => act('assist');
+  let armed = false;
+  document.getElementById('sab').onclick = () => {
+    const b = document.getElementById('sab');
+    if (!armed) { armed = true; b.querySelector('span').textContent = '⚠ Tap again to confirm'; setTimeout(() => { armed = false; b.querySelector('span').textContent = '✕ Sabotage'; }, 3000); return; }
+    armed = false; b.querySelector('span').textContent = '✕ Sabotage'; act('sabotage');
+  };
+  refresh(); tick = setInterval(refresh, 1000);
+}
+
+route();
+</script>
+</body>
+</html>
